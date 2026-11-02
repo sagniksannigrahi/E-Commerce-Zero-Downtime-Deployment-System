@@ -1,0 +1,237 @@
+---
+# =============================================================================
+# ShopFlow server provisioning (solves "manual server setup")
+#
+# Turns a fresh Ubuntu EC2 instance into a Docker + Nginx blue-green host.
+# Idempotent: running it again only changes what is missing or different.
+#
+#   cd ansible && ansible-playbook playbook.yml
+# =============================================================================
+- name: Provision ShopFlow EC2 host for blue-green deployments
+  hosts: shopflow
+  become: true
+
+  vars:
+    deploy_user: ubuntu
+    shopflow_home: /opt/shopflow
+    nginx_shopflow_dir: /etc/nginx/shopflow
+    swap_file: /swapfile
+    swap_size_mb: 1024        # t3.micro has only 1 GB RAM - swap keeps docker builds safe
+    base_packages:
+      - ca-certificates
+      - curl
+      - rsync
+      - openssl
+      - python3
+    docker_packages:          # from the Ubuntu archive (no extra apt repo needed)
+      - docker.io
+      - docker-compose-v2
+      - docker-buildx
+
+  handlers:
+    - name: Restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: true
+
+  tasks:
+    # ------------------------------------------------------------ packages
+    - name: Update apt package index (skipped if updated within the last hour)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 300
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: "{{ base_packages }}"
+        state: present
+        lock_timeout: 300
+
+    - name: Install Docker Engine, Compose plugin and Buildx
+      ansible.builtin.apt:
+        name: "{{ docker_packages }}"
+        state: present
+        lock_timeout: 300
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        lock_timeout: 300
+
+    # ------------------------------------------------------------ docker
+    - name: Configure Docker log rotation (protects the small EBS disk)
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": { "max-size": "10m", "max-file": "3" }
+          }
+      notify: Restart docker
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Allow the deploy user to run docker without sudo
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        groups: docker
+        append: true
+
+    - name: Reconnect so the new docker group membership takes effect
+      ansible.builtin.meta: reset_connection
+
+    # ------------------------------------------------------------ swap
+    - name: Check whether the swap file exists
+      ansible.builtin.stat:
+        path: "{{ swap_file }}"
+      register: swap_stat
+
+    - name: Create swap file
+      ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M {{ swap_file }}"
+      when: not swap_stat.stat.exists
+      register: swap_created
+      changed_when: true
+
+    - name: Secure swap file permissions
+      ansible.builtin.file:
+        path: "{{ swap_file }}"
+        mode: "0600"
+        owner: root
+        group: root
+
+    - name: Format swap file
+      ansible.builtin.command: "mkswap {{ swap_file }}"
+      when: swap_created is changed
+      changed_when: true
+
+    - name: Read active swap devices
+      ansible.builtin.command: swapon --show=NAME --noheadings
+      register: active_swap
+      changed_when: false
+
+    - name: Enable swap file
+      ansible.builtin.command: "swapon {{ swap_file }}"
+      when: swap_file not in active_swap.stdout
+      changed_when: true
+
+    - name: Enable swap at boot
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "{{ swap_file }} none swap sw 0 0"
+        state: present
+
+    - name: Prefer RAM over swap
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-shopflow.conf
+        mode: "0644"
+        content: "vm.swappiness=10\n"
+      notify: Apply sysctl settings
+
+    # ------------------------------------------------------------ deployment directories
+    - name: Create deployment directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ shopflow_home }}", mode: "0755" }
+        - { path: "{{ shopflow_home }}/releases", mode: "0755" }
+        - { path: "{{ shopflow_home }}/state", mode: "0750" }
+        - { path: "{{ nginx_shopflow_dir }}", mode: "0755" }
+
+    # ------------------------------------------------------------ nginx
+    - name: Create initial upstream file (points at BLUE; deploy.sh manages it afterwards)
+      ansible.builtin.copy:
+        dest: "{{ nginx_shopflow_dir }}/active_upstream.conf"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0644"
+        force: false          # never overwrite the live colour chosen by deploy.sh
+        content: |
+          # Managed by ShopFlow deploy.sh - do not edit by hand
+          # active colour: blue
+          server 127.0.0.1:5001;
+      notify: Reload nginx
+
+    - name: Install ShopFlow Nginx site
+      ansible.builtin.copy:
+        src: ../deployment/nginx/shopflow.conf
+        dest: /etc/nginx/sites-available/shopflow
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Enable ShopFlow site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/shopflow
+        dest: /etc/nginx/sites-enabled/shopflow
+        state: link
+      notify: Reload nginx
+
+    - name: Disable the default Nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Validate Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and start Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Allow the deploy user to test and reload Nginx without a password
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/shopflow-deploy
+        mode: "0440"
+        content: |
+          # Least-privilege rule used by deployment/deploy.sh
+          {{ deploy_user }} ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/nginx -t -q, /usr/bin/systemctl reload nginx
+        validate: visudo -cf %s
+
+    - name: Apply pending handler changes now
+      ansible.builtin.meta: flush_handlers
+
+    # ------------------------------------------------------------ verification
+    - name: Collect installed versions
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - docker --version
+        - docker compose version
+        - nginx -v
+      register: versions
+      changed_when: false
+
+    - name: Check Nginx answers on port 80
+      ansible.builtin.uri:
+        url: http://127.0.0.1/nginx-health
+        return_content: true
+      register: nginx_health
+
+    - name: Show summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ versions.results | map(attribute='stdout') | list + versions.results | map(attribute='stderr') | select | list }}"
+          - "Nginx health: {{ nginx_health.content | trim }}"
+          - "Server is ready for blue-green deployments in {{ shopflow_home }}"

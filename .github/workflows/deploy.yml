@@ -1,0 +1,156 @@
+# =============================================================================
+# ShopFlow CI/CD  (solves "frequent deployment failures")
+#
+#   push to main ──► 1. Test ──► 2. Build image ──► 3. Blue-Green deploy ──► 4. Verify
+#                      │ fail       │ fail             │ unhealthy
+#                      ▼            ▼                  ▼
+#                  STOP - nothing is deployed     traffic stays on the old version
+#
+# Required repository secrets: EC2_HOST, EC2_USER, EC2_SSH_KEY, EC2_KNOWN_HOSTS
+# =============================================================================
+name: CI/CD - Test, Build & Blue-Green Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]      # PRs are tested and built, never deployed
+  workflow_dispatch:      # "Run workflow" button for manual redeploys
+
+# Never run two production deployments at the same time
+concurrency:
+  group: shopflow-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  test:
+    name: 1. Run automated tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run Pytest (app + deployment script logic)
+        run: pytest -v
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: 2. Build & smoke-test Docker image
+    needs: test                     # only runs if every test passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Build Docker image
+        run: |
+          docker build -t shopflow:ci \
+            --build-arg APP_VERSION="$(cat VERSION)" \
+            --build-arg BUILD_SHA="${GITHUB_SHA::7}" .
+
+      - name: Start container and check /health
+        run: |
+          docker run -d --name smoke -p 5000:5000 -e APP_COLOR=ci shopflow:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:5000/health; then echo; echo "Image is healthy"; exit 0; fi
+            sleep 1
+          done
+          docker logs smoke
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: 3. Blue-Green deploy to AWS EC2
+    needs: build                    # only runs if tests AND build passed
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Check that deployment secrets are configured
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          missing=0
+          for name in EC2_HOST EC2_USER EC2_SSH_KEY EC2_KNOWN_HOSTS; do
+            if [ -z "${!name}" ]; then echo "::error::Repository secret $name is not set"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || { echo "Add the secrets under Settings > Secrets and variables > Actions"; exit 1; }
+
+      - name: Configure SSH (key + verified host key)
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/shopflow_deploy
+          chmod 600 ~/.ssh/shopflow_deploy
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          echo "SSH_CMD=ssh -i $HOME/.ssh/shopflow_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15" >> "$GITHUB_ENV"
+          echo "RELEASE_DIR=/opt/shopflow/releases/${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: Upload release files to EC2
+        run: |
+          rsync -az --delete -e "$SSH_CMD" \
+            --exclude .git --exclude .github --exclude tests --exclude docs \
+            --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
+            ./ "$EC2_USER@$EC2_HOST:$RELEASE_DIR/"
+
+      - name: Run blue-green deployment script
+        run: |
+          $SSH_CMD "$EC2_USER@$EC2_HOST" \
+            "APP_VERSION='$(cat VERSION)' BUILD_SHA='${GITHUB_SHA::7}' bash '$RELEASE_DIR/deployment/deploy.sh'"
+
+      - name: Verify public health endpoint
+        run: |
+          for i in $(seq 1 10); do
+            body="$(curl -fsS --max-time 5 "http://$EC2_HOST/health" || true)"
+            echo "Attempt $i: $body"
+            if echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q "\"build\":\"${GITHUB_SHA::7}\""; then
+              echo "Public endpoint is serving build ${GITHUB_SHA::7}"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::Public health check did not return the new build"
+          exit 1
+
+      - name: Show server status
+        if: always()
+        run: $SSH_CMD "$EC2_USER@$EC2_HOST" "bash /opt/shopflow/releases/\$(ls -1t /opt/shopflow/releases | head -1)/deployment/status.sh" || true
+
+      - name: Deployment report
+        if: always()
+        run: |
+          {
+            echo "## ShopFlow deployment report"
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA::7}\` |"
+            echo "| Version | v$(cat VERSION) |"
+            echo "| Result | ${{ job.status == 'success' && '✅ Deployed & verified' || '❌ Failed - live traffic was not switched to a broken release' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove SSH key from runner
+        if: always()
+        run: rm -f ~/.ssh/shopflow_deploy

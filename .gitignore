@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets - never commit keys or env files
+*.pem
+*.key
+id_*
+.env
+*.env
+compose.env
+
+# Ansible
+*.retry
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

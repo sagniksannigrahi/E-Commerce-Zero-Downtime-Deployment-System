@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ app_name }} · Zero-Downtime Store</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=deploy.release) }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛍️</text></svg>">
+</head>
+<body data-color="{{ deploy.color }}" data-version="{{ deploy.version }}">
+
+  <!-- Deployment ribbon: shows which environment rendered this page -->
+  <div class="deploy-ribbon env-{{ deploy.color }}" id="deployRibbon">
+    <span class="dot"></span>
+    <span>Served by <strong id="ribbonColor">{{ deploy.color|upper }}</strong> environment</span>
+    <span class="sep">•</span>
+    <span>Version <strong id="ribbonVersion">v{{ deploy.version }}</strong></span>
+    <span class="sep">•</span>
+    <span>Build <code id="ribbonBuild">{{ deploy.build }}</code></span>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🛍️</span>
+      <div>
+        <h1>{{ app_name }}</h1>
+        <p>Zero-downtime e-commerce demo</p>
+      </div>
+    </div>
+    <div class="search">
+      <input type="search" id="searchBox" placeholder="Search products…" aria-label="Search products">
+    </div>
+    <button class="cart-button" id="openCart" aria-label="Open cart">
+      🛒 <span>Cart</span> <span class="badge" id="cartCount">0</span>
+    </button>
+  </header>
+
+  <main class="layout">
+    <!-- KPI dashboard -->
+    <section class="kpis">
+      <div class="kpi">
+        <p class="kpi-label">Products</p>
+        <p class="kpi-value">{{ products|length }}</p>
+        <p class="kpi-sub">In catalogue</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-label">Cart total</p>
+        <p class="kpi-value" id="kpiTotal">₹0</p>
+        <p class="kpi-sub" id="kpiItems">0 items</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-label">Live environment</p>
+        <p class="kpi-value"><span class="pill env-{{ deploy.color }}" id="kpiColor">{{ deploy.color|upper }}</span></p>
+        <p class="kpi-sub" id="kpiUptime">uptime –</p>
+      </div>
+      <div class="kpi">
+        <p class="kpi-label">Health checks</p>
+        <p class="kpi-value"><span id="kpiOk">0</span> <small>ok</small> / <span id="kpiFail">0</span> <small>failed</small></p>
+        <p class="kpi-sub">Polled every 2s from this page</p>
+      </div>
+    </section>
+
+    <div class="content">
+      <!-- Product catalogue -->
+      <section class="catalogue">
+        <div class="section-head">
+          <h2>Featured products</h2>
+          <div class="filters" id="filters">
+            <button class="chip active" data-cat="all">All</button>
+            {% for cat in products|map(attribute='category')|unique|sort %}
+            <button class="chip" data-cat="{{ cat }}">{{ cat }}</button>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="grid" id="productGrid">
+          {% for p in products %}
+          <article class="card" data-name="{{ p.name|lower }}" data-cat="{{ p.category }}">
+            <div class="thumb" style="--accent: {{ p.color }}">
+              <span>{{ p.icon }}</span>
+            </div>
+            <div class="card-body">
+              <p class="category">{{ p.category }}</p>
+              <h3>{{ p.name }}</h3>
+              <p class="rating">★ {{ p.rating }}</p>
+              <div class="card-foot">
+                <span class="price">₹{{ '{:,.0f}'.format(p.price) }}</span>
+                <button class="add-btn" data-id="{{ p.id }}">Add to cart</button>
+              </div>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <!-- Live deployment monitor -->
+      <aside class="monitor">
+        <h2>Deployment monitor</h2>
+        <p class="muted">This panel calls <code>/api/status</code> every 2 seconds. During a blue-green release you will see the environment change with no failed requests.</p>
+        <dl class="status-list">
+          <dt>Environment</dt><dd><span class="pill env-{{ deploy.color }}" id="monColor">{{ deploy.color|upper }}</span></dd>
+          <dt>Version</dt><dd id="monVersion">v{{ deploy.version }}</dd>
+          <dt>Build</dt><dd><code id="monBuild">{{ deploy.build }}</code></dd>
+          <dt>Container</dt><dd><code id="monHost">–</code></dd>
+          <dt>Last check</dt><dd id="monTime">–</dd>
+        </dl>
+        <h3>Recent responses</h3>
+        <div class="timeline" id="timeline"></div>
+        <h3>Switch history</h3>
+        <ul class="events" id="events"><li class="muted">No environment switches seen yet.</li></ul>
+      </aside>
+    </div>
+  </main>
+
+  <!-- Cart drawer -->
+  <div class="overlay" id="overlay" hidden></div>
+  <aside class="drawer" id="cartDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>Your cart</h2>
+      <button class="icon-btn" id="closeCart" aria-label="Close cart">✕</button>
+    </div>
+    <div class="drawer-body" id="cartItems"><p class="muted">Your cart is empty.</p></div>
+    <div class="drawer-foot">
+      <div class="row"><span>Subtotal</span><span id="cartSubtotal">₹0</span></div>
+      <div class="row"><span>Shipping</span><span id="cartShipping">₹0</span></div>
+      <div class="row total"><span>Total</span><span id="cartTotal">₹0</span></div>
+      <p class="muted small">Free shipping on orders above ₹5,000.</p>
+      <button class="primary" id="checkoutBtn" disabled>Place order</button>
+      <button class="ghost" id="clearCart">Clear cart</button>
+    </div>
+  </aside>
+
+  <!-- Order confirmation -->
+  <div class="modal" id="orderModal" hidden>
+    <div class="modal-card">
+      <div class="success-icon">✓</div>
+      <h2>Order confirmed!</h2>
+      <p>Order <strong id="orderId"></strong> for <strong id="orderTotal"></strong></p>
+      <p class="muted small" id="orderServedBy"></p>
+      <p class="muted small">This is a demo — no payment was taken.</p>
+      <button class="primary" id="closeModal">Continue shopping</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <footer class="footer">
+    {{ app_name }} · Flask + Gunicorn in Docker · Nginx blue-green switching · GitHub Actions CI/CD · Ansible-provisioned AWS EC2
+  </footer>
+
+  <script src="{{ url_for('static', filename='script.js', v=deploy.release) }}"></script>
+</body>
+</html>

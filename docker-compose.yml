@@ -1,0 +1,40 @@
+# Two identical copies of ShopFlow: BLUE (port 5001) and GREEN (port 5002).
+# Nginx sends public traffic to exactly one of them at a time.
+#
+# Local use:   docker compose up --build
+# On EC2:      deploy.sh sets BLUE_IMAGE / GREEN_IMAGE / SECRET_KEY through
+#              an env file and starts only the inactive colour.
+name: shopflow
+
+services:
+  shopflow-blue:
+    build: .
+    image: ${BLUE_IMAGE:-shopflow:local}
+    container_name: shopflow-blue
+    environment:
+      APP_COLOR: blue
+      SECRET_KEY: ${SECRET_KEY:-dev-only-secret-change-me}
+    ports:
+      - "127.0.0.1:5001:5000"   # only reachable through Nginx, not the internet
+    restart: unless-stopped      # auto-restart if the app crashes
+    stop_grace_period: 20s       # let in-flight requests finish
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  shopflow-green:
+    build: .
+    image: ${GREEN_IMAGE:-shopflow:local}
+    container_name: shopflow-green
+    environment:
+      APP_COLOR: green
+      SECRET_KEY: ${SECRET_KEY:-dev-only-secret-change-me}
+    ports:
+      - "127.0.0.1:5002:5000"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
