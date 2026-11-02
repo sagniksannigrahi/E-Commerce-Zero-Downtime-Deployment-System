@@ -96,7 +96,9 @@ shopflow-zero-downtime/
 │   ├── test_app.py            22 app tests
 │   └── test_deploy_script.py  11 tests of the deployment/rollback logic
 ├── docs/demo-guide.md         5–7 minute live demo plan + viva questions
-└── .github/workflows/deploy.yml
+└── .github/workflows/
+    ├── deploy.yml             CI/CD: test -> build -> blue-green deploy (on push to main)
+    └── operations.yml         Buttons for provision / status / rollback / simulate-failure / deploy
 ```
 
 ## 5. The application
@@ -265,6 +267,12 @@ bash $R/deployment/rollback.sh    # instant rollback to the standby colour
 ```
 
 **Re-provision:** `cd ansible && ansible-playbook playbook.yml`
+
+**From GitHub (no SSH needed on your network):** Actions → **Operations** → *Run workflow* → choose `provision`, `status`, `rollback`, `simulate-failure` or `deploy`. GitHub's servers do the SSH work, which helps when campus Wi-Fi blocks port 22. CLI equivalent:
+
+```bash
+gh workflow run operations.yml -f action=rollback
+```
 
 ## 13. Demonstrating to a professor
 
