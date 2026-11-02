@@ -56,6 +56,8 @@ deployment/push-release.sh
 Narrate the deploy output:
 > "Blue is live and keeps serving users. The script builds the new version and starts it in **green**. It health-checks green directly. Only when green is healthy does it switch Nginx with an **atomic file rename and a graceful reload**. Then it verifies through Nginx."
 
+Option 3 — no SSH needed (campus Wi-Fi): GitHub → Actions → **Operations** → Run workflow → `zero-downtime-test`. The log ends with "Zero-downtime check: N requests, 0 failed".
+
 Then show:
 * Terminal A: the colour changes from `blue` to `green` with **fail=0**.
 * Browser: the ribbon turns green, version 1.1.0 appears, and the switch history logs the change. **The cart still has its items.**

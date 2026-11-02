@@ -6,6 +6,8 @@
 #   rollback          Switch traffic back to the standby colour (instant)
 #   simulate-failure  Deploy a deliberately broken release - it must be refused
 #   deploy            Normal blue-green deployment of the current main branch
+#   zero-downtime-test  Deploy while ~10 requests/second hit Nginx on the server;
+#                       fails if even one request fails
 #
 # Useful when your own network blocks SSH (port 22): GitHub's servers do
 # the SSH work instead.
@@ -20,7 +22,7 @@ on:
         required: true
         default: status
         type: choice
-        options: [provision, status, rollback, simulate-failure, deploy]
+        options: [provision, status, rollback, simulate-failure, deploy, zero-downtime-test]
 
 concurrency:
   group: shopflow-production     # shared with the CI/CD workflow
@@ -68,7 +70,7 @@ jobs:
 
       # ---------------------------------------------------------------- deploy / simulate-failure
       - name: Upload release files
-        if: inputs.action == 'deploy' || inputs.action == 'simulate-failure'
+        if: inputs.action == 'deploy' || inputs.action == 'simulate-failure' || inputs.action == 'zero-downtime-test'
         run: |
           rsync -az --delete -e "$SSH_CMD" \
             --exclude .git --exclude .github --exclude tests --exclude docs \
@@ -79,6 +81,22 @@ jobs:
         run: |
           $SSH_CMD "$EC2_USER@$EC2_HOST" \
             "APP_VERSION='$(cat VERSION)' BUILD_SHA='${GITHUB_SHA::7}' bash '$RELEASE_DIR/deployment/deploy.sh'"
+
+      - name: Zero-downtime test (deploy under continuous traffic)
+        if: inputs.action == 'zero-downtime-test'
+        run: |
+          $SSH_CMD "$EC2_USER@$EC2_HOST" "bash '$RELEASE_DIR/deployment/zero-downtime-check.sh' start"
+          set +e
+          $SSH_CMD "$EC2_USER@$EC2_HOST" \
+            "APP_VERSION='$(cat VERSION)' BUILD_SHA='${GITHUB_SHA::7}' bash '$RELEASE_DIR/deployment/deploy.sh'"
+          deploy_rc=$?
+          sleep 3   # keep measuring a little after the switch
+          $SSH_CMD "$EC2_USER@$EC2_HOST" "bash '$RELEASE_DIR/deployment/zero-downtime-check.sh' stop"
+          check_rc=$?
+          set -e
+          [ "$deploy_rc" -eq 0 ] || { echo "::error::Deployment failed"; exit 1; }
+          [ "$check_rc" -eq 0 ] || { echo "::error::Requests failed during the deployment"; exit 1; }
+          echo "::notice::Zero-downtime verified: no failed requests during the blue-green switch"
 
       - name: Deploy a broken release (expected to be REFUSED)
         if: inputs.action == 'simulate-failure'

@@ -88,7 +88,8 @@ shopflow-zero-downtime/
 │   ├── lib.sh                 Shared helpers (locking, health checks, Nginx switching)
 │   ├── status.sh              Shows live colour, containers and deployment history
 │   ├── push-release.sh        Deploy from a laptop the same way CI does
-│   ├── traffic-monitor.sh     Sends 4 requests/second to prove zero downtime
+│   ├── traffic-monitor.sh     Sends 4 requests/second from your laptop during a deploy
+│   ├── zero-downtime-check.sh Same check run on the server itself (used by CI)
 │   └── nginx/shopflow.conf    Nginx reverse-proxy site
 ├── templates/index.html       Shop dashboard
 ├── static/style.css, script.js
@@ -268,7 +269,7 @@ bash $R/deployment/rollback.sh    # instant rollback to the standby colour
 
 **Re-provision:** `cd ansible && ansible-playbook playbook.yml`
 
-**From GitHub (no SSH needed on your network):** Actions → **Operations** → *Run workflow* → choose `provision`, `status`, `rollback`, `simulate-failure` or `deploy`. GitHub's servers do the SSH work, which helps when campus Wi-Fi blocks port 22. CLI equivalent:
+**From GitHub (no SSH needed on your network):** Actions → **Operations** → *Run workflow* → choose `provision`, `status`, `rollback`, `simulate-failure`, `deploy` or `zero-downtime-test` (deploys while ~10 requests/second hit Nginx on the server and fails if even one request fails). GitHub's servers do the SSH work, which helps when campus Wi-Fi blocks port 22. CLI equivalent:
 
 ```bash
 gh workflow run operations.yml -f action=rollback
